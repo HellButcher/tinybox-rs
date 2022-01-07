@@ -1,0 +1,13 @@
+[package]
+name = "tinybox"
+version = "0.1.0"
+description = "Like `Box`, but with an optimization that avoids allocations for small data-structures"
+authors = ["Christoph Hommelsheim <main@chommel.eu>"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/HellButcher/pulz.git"
+keywords = ["box", "collection", "dyn"]
+categories = ["data-structures", "no-std"]
+readme = "README.md"
+edition = "2021"
+
+[dependencies]
