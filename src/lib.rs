@@ -58,7 +58,7 @@ macro_rules! tinybox {
     ($t:ty = $e:expr; $s:expr) => {{
         let mut val = $e;
         let ptr: *mut _ = &mut val;
-        #[allow(unsafe_code)]
+        #[allow(unsafe_code, clippy::forget_copy)]
         unsafe {
             let boxed: $crate::TinyBoxSized<$t, $s> = $crate::TinyBoxSized::read_raw(ptr);
             $crate::__forget(val);
