@@ -5,7 +5,7 @@
 [![docs.rs](https://docs.rs/tinybox/badge.svg)](https://docs.rs/tinybox/)
 -->
 [![license: MIT/Apache-2.0](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](#license)
-[![Rust CI](https://github.com/HellButcher/tinybox/actions/workflows/rust.yml/badge.svg)](https://github.com/HellButcher/tinybox/actions/workflows/rust.yml)
+[![Rust CI](https://github.com/HellButcher/tinybox-rs/actions/workflows/rust.yml/badge.svg)](https://github.com/HellButcher/tinybox-rs/actions/workflows/rust.yml)
 
 <!-- Short Introduction -->
 `TinyBox` is like `Box`, but with an optimization that avoids allocations for small data-structures. This works by storing the value-bits inside the box itself, when the data-structure fits inside a pointer. This is especially usefull for dyn-Traits.
