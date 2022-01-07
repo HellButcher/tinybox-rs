@@ -1,9 +1,7 @@
 # `tinybox`
 
-<!--
 [![Crates.io](https://img.shields.io/crates/v/tinybox.svg?label=tinybox)](https://crates.io/crates/tinybox)
 [![docs.rs](https://docs.rs/tinybox/badge.svg)](https://docs.rs/tinybox/)
--->
 [![license: MIT/Apache-2.0](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](#license)
 [![Rust CI](https://github.com/HellButcher/tinybox-rs/actions/workflows/rust.yml/badge.svg)](https://github.com/HellButcher/tinybox-rs/actions/workflows/rust.yml)
 
