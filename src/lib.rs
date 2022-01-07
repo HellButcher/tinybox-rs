@@ -46,16 +46,7 @@ pub use core::mem::forget as __forget;
 
 #[macro_export]
 macro_rules! tinybox {
-    ($e:expr) => {
-        tinybox!(_ = $e; 0)
-    };
-    ($e:expr; $s:expr) => {
-        tinybox!(_ = $e; $s)
-    };
-    ($t:ty = $e:expr) => {
-        tinybox!($t = $e; 0)
-    };
-    ($t:ty = $e:expr; $s:expr) => {{
+    ($t:ty => $e:expr; $s:expr) => {{
         let mut val = $e;
         let ptr: *mut _ = &mut val;
         #[allow(unsafe_code, clippy::forget_copy)]
@@ -65,6 +56,15 @@ macro_rules! tinybox {
             boxed
         }
     }};
+    ($t:ty => $e:expr) => {
+        tinybox!($t => $e; 0)
+    };
+    ($e:expr; $s:expr) => {
+        tinybox!(_ => $e; $s)
+    };
+    ($e:expr) => {
+        tinybox!(_ => $e; 0)
+    };
 }
 
 impl<T: ?Sized, const S: usize> TinyBoxSized<T, S> {
@@ -466,38 +466,38 @@ mod tests {
 
     #[test]
     fn test_any() {
-        let tiny = tinybox!(dyn Any = 12345usize);
+        let tiny = tinybox!(dyn Any => 12345usize);
         assert!(tiny.is_tiny());
         assert_eq!(12345, *tiny.downcast::<usize>().unwrap());
 
-        let big: TinyBox<dyn Any> = tinybox!(dyn Any = [12345usize, 5678]);
+        let big: TinyBox<dyn Any> = tinybox!(dyn Any => [12345usize, 5678]);
         assert!(!big.is_tiny());
         assert_eq!([12345, 5678], *big.downcast::<[usize; 2]>().unwrap());
 
-        let tiny_sized: TinyBoxSized<dyn Any, 1> = tinybox!(dyn Any = [12345usize, 5678]; 1);
+        let tiny_sized: TinyBoxSized<dyn Any, 1> = tinybox!(dyn Any => [12345usize, 5678]; 1);
         assert!(tiny_sized.is_tiny());
         assert_eq!([12345, 5678], *tiny_sized.downcast::<[usize; 2]>().unwrap());
 
-        let big_sized: TinyBoxSized<dyn Any, 1> = tinybox!(dyn Any = [12345usize, 5678, 4567]; 1);
+        let big_sized: TinyBoxSized<dyn Any, 1> = tinybox!(dyn Any => [12345usize, 5678, 4567]; 1);
         assert!(!big_sized.is_tiny());
         assert_eq!(
             [12345, 5678, 4567],
             *big_sized.downcast::<[usize; 3]>().unwrap()
         );
 
-        let tiny = tinybox!(dyn Any = 12345usize);
+        let tiny = tinybox!(dyn Any => 12345usize);
         assert!(tiny.is_tiny());
         assert!(tiny.downcast::<u8>().is_err());
 
-        let big: TinyBox<dyn Any> = tinybox!(dyn Any = [12345usize, 5678]);
+        let big: TinyBox<dyn Any> = tinybox!(dyn Any => [12345usize, 5678]);
         assert!(!big.is_tiny());
         assert!(big.downcast::<u8>().is_err());
 
-        let tiny_sized: TinyBoxSized<dyn Any, 1> = tinybox!(dyn Any = [12345usize, 5678]; 1);
+        let tiny_sized: TinyBoxSized<dyn Any, 1> = tinybox!(dyn Any => [12345usize, 5678]; 1);
         assert!(tiny_sized.is_tiny());
         assert!(tiny_sized.downcast::<usize>().is_err());
 
-        let big_sized: TinyBoxSized<dyn Any, 1> = tinybox!(dyn Any = [12345usize, 5678, 4567]; 1);
+        let big_sized: TinyBoxSized<dyn Any, 1> = tinybox!(dyn Any => [12345usize, 5678, 4567]; 1);
         assert!(!big_sized.is_tiny());
         assert!(big_sized.downcast::<usize>().is_err());
     }

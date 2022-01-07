@@ -21,7 +21,7 @@ This looks not very usefull, because the value can be stored inside a `usize` va
 ```rust
 use std::any::{Any,TypeId};
 use tinybox::{tinybox, TinyBox};
-let boxed = tinybox!(dyn Any = 1234usize);
+let boxed = tinybox!(dyn Any => 1234usize);
 assert_eq!(TypeId::of::<usize>(), (*boxed).type_id());
 assert_eq!(1234, *boxed.downcast::<usize>().unwrap());
 ```
