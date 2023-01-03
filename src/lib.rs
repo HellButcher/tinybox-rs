@@ -68,6 +68,7 @@ macro_rules! tinybox {
 }
 
 impl<T: ?Sized, const S: usize> TinyBoxSized<T, S> {
+
     /// # Safety
     /// Behavior is undefined if any of the following conditions are violated:
     /// * `src` must be [valid] for reads.
@@ -388,6 +389,17 @@ impl<const S: usize> TinyBoxSized<dyn any::Any, S> {
 }
 
 impl<const S: usize> TinyBoxSized<dyn any::Any + Send, S> {
+    #[inline]
+    pub fn downcast<T: any::Any>(self) -> Result<TinyBoxSized<T, S>, Self> {
+        if self.is::<T>() {
+            unsafe { Ok(self.downcast_unchecked()) }
+        } else {
+            Err(self)
+        }
+    }
+}
+
+impl<const S: usize> TinyBoxSized<dyn any::Any + Send + Sync, S> {
     #[inline]
     pub fn downcast<T: any::Any>(self) -> Result<TinyBoxSized<T, S>, Self> {
         if self.is::<T>() {
