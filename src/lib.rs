@@ -68,7 +68,6 @@ macro_rules! tinybox {
 }
 
 impl<T: ?Sized, const S: usize> TinyBoxSized<T, S> {
-
     /// # Safety
     /// Behavior is undefined if any of the following conditions are violated:
     /// * `src` must be [valid] for reads.
