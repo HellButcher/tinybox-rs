@@ -6,7 +6,7 @@
 [![Rust CI](https://github.com/HellButcher/tinybox-rs/actions/workflows/rust.yml/badge.svg)](https://github.com/HellButcher/tinybox-rs/actions/workflows/rust.yml)
 
 <!-- Short Introduction -->
-`TinyBox` is like `Box`, but with an optimization that avoids allocations for small data-structures. This works by storing the value-bits inside the box itself, when the data-structure fits inside a pointer. This is especially usefull for dyn-Traits.
+`TinyBox` is like `Box`, but with an optimization that avoids allocations for small data-structures. This works by storing the value-bits inside the box itself, when the data-structure fits inside a pointer. This is especially usefull for dynamically sized types like traits.
 
 ## Example
 
@@ -21,7 +21,7 @@ This looks not very usefull, because the value can be stored inside a `usize` va
 ```rust
 use std::any::{Any,TypeId};
 use tinybox::{tinybox, TinyBox};
-let boxed = tinybox!(dyn Any => 1234usize);
+let boxed: TinyBox<dyn Any> = tinybox!(dyn Any => 1234usize);
 assert_eq!(TypeId::of::<usize>(), (*boxed).type_id());
 assert_eq!(1234, *boxed.downcast::<usize>().unwrap());
 ```
