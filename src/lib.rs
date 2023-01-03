@@ -29,12 +29,12 @@ extern crate alloc;
 
 use core::{
     any, borrow, cmp, fmt, future, hash,
-    mem::{self, ManuallyDrop, MaybeUninit},
+    mem::{self, MaybeUninit},
     ops, pin, ptr, task,
 };
 
 #[repr(C)]
-pub struct TinyBoxSized<T: ?Sized, const S: usize>([usize; S], *mut T);
+pub struct TinyBoxSized<T: ?Sized, const S: usize>([*const usize; S], *mut T);
 
 pub type TinyBox<T> = TinyBoxSized<T, 0>;
 
@@ -91,23 +91,25 @@ impl<T: ?Sized, const S: usize> TinyBoxSized<T, S> {
         let align = mem::align_of_val::<T>(&*src);
 
         // initialize dest with source (for retaining vtable in fat-pointer)
-        let mut dest: ManuallyDrop<Self> = ManuallyDrop::new(Self([0; S], src));
-        let dest_ptr = ptr::addr_of_mut!(dest.1) as *mut usize;
+        let mut dest: MaybeUninit<Self> = MaybeUninit::zeroed();
+        let dest_ptr = ptr::addr_of_mut!((*dest.as_mut_ptr()).1);
+        ptr::write(dest_ptr, src);
+        let dest_ptr = dest_ptr as *mut *mut u8;
 
-        let copy_ptr = if size <= (S + 1) * PTR_SIZE && align <= PTR_ALIGN {
+        let copy_dest_ptr = if Self::is_tiny_by_components(size, align) {
             // Tiny
-            ptr::write(dest_ptr, 0usize); // initialize pointer with zero
-            dest.0.as_mut_ptr() as *mut u8 // place value as inside the space of the pointer
+            // replace pointer-part from fat-pointer with 0
+            ptr::write(dest_ptr, ptr::null_mut());
+            ptr::addr_of_mut!((*dest.as_mut_ptr()).0) as *mut u8 // address to start of value
         } else {
             // Alloc
             let layout = alloc::alloc::Layout::for_value::<T>(&*src);
             let heap_ptr = alloc::alloc::alloc(layout);
-            ptr::write(dest_ptr, heap_ptr as usize); // set pointer to the heap-location
+            ptr::write(dest_ptr, heap_ptr); // set pointer to the heap-location
             heap_ptr
         };
-        ptr::copy_nonoverlapping(src as *const u8, copy_ptr, size);
-
-        ManuallyDrop::into_inner(dest)
+        ptr::copy_nonoverlapping(src as *const u8, copy_dest_ptr, size);
+        dest.assume_init()
     }
 
     #[inline(always)]
@@ -116,8 +118,16 @@ impl<T: ?Sized, const S: usize> TinyBoxSized<T, S> {
     }
 
     #[inline(always)]
+    const fn is_tiny_sized() -> bool
+    where
+        T: Sized,
+    {
+        Self::is_tiny_by_components(mem::size_of::<T>(), mem::align_of::<T>())
+    }
+
+    #[inline(always)]
     fn is_tiny_ref(v: &T) -> bool {
-        mem::size_of_val(v) <= (S + 1) * PTR_SIZE && mem::align_of_val(v) <= PTR_ALIGN
+        Self::is_tiny_by_components(mem::size_of_val(v), mem::align_of_val(v))
     }
 
     #[inline(always)]
@@ -125,11 +135,18 @@ impl<T: ?Sized, const S: usize> TinyBoxSized<T, S> {
         Self::is_tiny_ref(&*v)
     }
 
+    #[inline(always)]
+    const fn is_tiny_by_components(size: usize, align: usize) -> bool {
+        size <= (S + 1) * PTR_SIZE && align <= PTR_ALIGN
+    }
+
     unsafe fn tiny_as_ptr(&self) -> *mut T {
         let mut dest = self.1; // initialize dest with original value (initializes fat-pointer)
-        let dest_ptr: *mut _ = &mut dest;
-        let dest_ptr = dest_ptr as *mut usize;
-        ptr::write(dest_ptr, self.0.as_ptr() as usize); // replace pointer
+        let dest_ptr: *mut *mut _ = &mut dest;
+        // get access to pointer-part of fat-pointer
+        let dest_ptr = dest_ptr as *mut *const usize;
+        let src = self.0.as_ptr() as *const usize;
+        ptr::write(dest_ptr, src); // replace pointer
         dest
     }
 
@@ -156,29 +173,44 @@ impl<T: ?Sized, const S: usize> TinyBoxSized<T, S> {
 }
 
 impl<T: Sized, const S: usize> TinyBoxSized<T, S> {
-    #[inline(always)]
-    pub fn new(v: T) -> Self
-    where
-        T: Sized,
-    {
-        tinybox!(v;S)
+    #[inline]
+    pub fn new(v: T) -> Self {
+        if Self::is_tiny_sized() {
+            let mut dest: MaybeUninit<Self> = MaybeUninit::zeroed();
+            let dest_ptr = dest.as_mut_ptr() as *mut T;
+            // SAFETY: 1. valid pointer, 2. alignment & size checked by `is_tiny_sized`
+            unsafe {
+                ptr::write(dest_ptr, v);
+                dest.assume_init()
+            }
+        } else {
+            unsafe {
+                let layout = alloc::alloc::Layout::new::<T>();
+                let ptr = alloc::alloc::alloc(layout) as *mut T;
+                ptr::write(ptr, v);
+                Self([ptr::null_mut(); S], ptr)
+            }
+        }
     }
 
     pub fn into_inner(boxed: Self) -> T {
-        unsafe {
-            let result;
-            if boxed.is_tiny() {
-                let ptr = boxed.tiny_as_ptr();
-                result = ptr::read(ptr);
-            } else {
+        if Self::is_tiny_sized() {
+            unsafe {
+                let src_ptr = boxed.0.as_ptr() as *const T;
+                let result = ptr::read(src_ptr);
+                mem::forget(boxed);
+                result
+            }
+        } else {
+            unsafe {
                 // deallocate heap
                 let ptr = boxed.1;
-                let layout = alloc::alloc::Layout::for_value::<T>(&*ptr);
-                result = ptr::read(ptr);
+                let layout = alloc::alloc::Layout::new::<T>();
+                let result = ptr::read(ptr);
                 alloc::alloc::dealloc(ptr as *mut u8, layout);
+                mem::forget(boxed);
+                result
             }
-            core::mem::forget(boxed);
-            result
         }
     }
 }
@@ -206,25 +238,25 @@ impl<T: ?Sized, const S: usize> ops::DerefMut for TinyBoxSized<T, S> {
 
 impl<T: ?Sized, const S: usize> borrow::Borrow<T> for TinyBoxSized<T, S> {
     fn borrow(&self) -> &T {
-        &**self
+        self
     }
 }
 
 impl<T: ?Sized, const S: usize> borrow::BorrowMut<T> for TinyBoxSized<T, S> {
     fn borrow_mut(&mut self) -> &mut T {
-        &mut **self
+        self
     }
 }
 
 impl<T: ?Sized, const S: usize> AsRef<T> for TinyBoxSized<T, S> {
     fn as_ref(&self) -> &T {
-        &**self
+        self
     }
 }
 
 impl<T: ?Sized, const S: usize> AsMut<T> for TinyBoxSized<T, S> {
     fn as_mut(&mut self) -> &mut T {
-        &mut **self
+        self
     }
 }
 
@@ -334,8 +366,9 @@ impl<T: ?Sized + future::Future, const S: usize> future::Future for TinyBoxSized
     type Output = T::Output;
 
     #[inline]
-    fn poll(mut self: pin::Pin<&mut Self>, cx: &mut task::Context<'_>) -> task::Poll<Self::Output> {
-        self.as_mut().poll(cx)
+    fn poll(self: pin::Pin<&mut Self>, cx: &mut task::Context<'_>) -> task::Poll<Self::Output> {
+        let fut: pin::Pin<&mut T> = unsafe { self.map_unchecked_mut(ops::DerefMut::deref_mut) };
+        fut.poll(cx)
     }
 }
 
@@ -368,6 +401,8 @@ impl<const S: usize> TinyBoxSized<dyn any::Any + Send, S> {
 #[cfg(test)]
 mod tests {
     use core::{any::Any, cell::Cell, mem, ops::Deref, ptr};
+
+    use alloc::rc::Rc;
 
     use crate::{TinyBox, TinyBoxSized};
     #[test]
@@ -504,38 +539,39 @@ mod tests {
 
     #[test]
     fn test_drop() {
-        let counter = Cell::new(0usize);
+        let counter = Rc::new(Cell::new(0usize));
 
-        struct DropCount<'l>(&'l Cell<usize>);
-        impl Drop for DropCount<'_> {
+        struct DropCount(Rc<Cell<usize>>);
+        impl Drop for DropCount {
             fn drop(&mut self) {
                 self.0.set(self.0.get() + 1);
             }
         }
 
         counter.set(0);
-        let tiny = TinyBox::new(DropCount(&counter));
+        let tiny = TinyBox::new(DropCount(counter.clone()));
         assert!(tiny.is_tiny());
         assert_eq!(0, counter.get());
         drop(tiny);
         assert_eq!(1, counter.get());
 
         counter.set(0);
-        let big = TinyBox::new((12345usize, DropCount(&counter)));
+        let big = TinyBox::new((12345usize, DropCount(counter.clone())));
         assert!(!big.is_tiny());
         assert_eq!(0, counter.get());
         drop(big);
         assert_eq!(1, counter.get());
 
         counter.set(0);
-        let big2 = TinyBox::new((DropCount(&counter), DropCount(&counter)));
+        let big2 = TinyBox::new((DropCount(counter.clone()), DropCount(counter.clone())));
         assert!(!big2.is_tiny());
         assert_eq!(0, counter.get());
         drop(big2);
         assert_eq!(2, counter.get());
 
         counter.set(0);
-        let tiny_sized: TinyBoxSized<_, 1> = TinyBoxSized::new((12345usize, DropCount(&counter)));
+        let tiny_sized: TinyBoxSized<_, 1> =
+            TinyBoxSized::new((12345usize, DropCount(counter.clone())));
         assert!(tiny_sized.is_tiny());
         assert_eq!(12345, (*tiny_sized).0);
         assert_eq!(0, counter.get());
@@ -543,12 +579,29 @@ mod tests {
         assert_eq!(1, counter.get());
 
         counter.set(0);
-        let big_sized: TinyBoxSized<_, 1> =
-            TinyBoxSized::new((12345usize, DropCount(&counter), DropCount(&counter)));
+        let big_sized: TinyBoxSized<_, 1> = TinyBoxSized::new((
+            12345usize,
+            DropCount(counter.clone()),
+            DropCount(counter.clone()),
+        ));
         assert!(!big_sized.is_tiny());
         assert_eq!(12345, (*big_sized).0);
         assert_eq!(0, counter.get());
         drop(big_sized);
         assert_eq!(2, counter.get());
+
+        counter.set(0);
+        let tiny_dyn = tinybox!(dyn Any => DropCount(counter.clone()));
+        assert!(tiny_dyn.is_tiny());
+        assert_eq!(0, counter.get());
+        drop(tiny_dyn);
+        assert_eq!(1, counter.get());
+
+        counter.set(0);
+        let big_dyn = tinybox!(dyn Any => (12345usize, DropCount(counter.clone())));
+        assert!(!big_dyn.is_tiny());
+        assert_eq!(0, counter.get());
+        drop(big_dyn);
+        assert_eq!(1, counter.get());
     }
 }
