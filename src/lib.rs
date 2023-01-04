@@ -49,7 +49,7 @@ macro_rules! tinybox {
     ($t:ty => $e:expr; $s:expr) => {{
         let mut val = $e;
         let ptr: *mut _ = &mut val;
-        #[allow(unsafe_code, clippy::forget_copy)]
+        #[allow(unsafe_code, clippy::forget_copy, clippy::forget_ref)]
         unsafe {
             let boxed: $crate::TinyBoxSized<$t, $s> = $crate::TinyBoxSized::read_raw(ptr);
             $crate::__forget(val);
@@ -420,6 +420,7 @@ mod tests {
     fn test_assumptions() {
         let ptr_size = mem::size_of::<usize>();
 
+        #[allow(clippy::let_unit_value)]
         let value_zero = ();
         let value_tiny = 123u32;
         let value_big = [123u64; 4];
