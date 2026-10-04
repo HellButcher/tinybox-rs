@@ -28,6 +28,7 @@
 extern crate alloc;
 
 use core::{
+    alloc::Layout,
     any, borrow, cmp, fmt, future, hash,
     mem::{self, MaybeUninit},
     ops, pin, ptr, task,
@@ -87,8 +88,7 @@ impl<T: ?Sized, const S: usize> TinyBoxSized<T, S> {
     /// [`mem::forget`]: std::mem::forget
     /// [valid]: std::ptr#safety
     pub unsafe fn read_raw(src: *mut T) -> Self {
-        let size = size_of_val::<T>(&*src);
-        let align = align_of_val::<T>(&*src);
+        let layout = Layout::for_value_raw::<T>(src);
 
         // initialize dest with source (for retaining vtable in fat-pointer)
         let mut dest: MaybeUninit<Self> = MaybeUninit::zeroed();
@@ -96,19 +96,18 @@ impl<T: ?Sized, const S: usize> TinyBoxSized<T, S> {
         ptr::write(dest_ptr, src);
         let dest_ptr = dest_ptr as *mut *mut u8;
 
-        let copy_dest_ptr = if Self::is_tiny_by_components(size, align) {
+        let copy_dest_ptr = if Self::is_tiny_by_layout(layout) {
             // Tiny
             // replace pointer-part from fat-pointer with 0
             ptr::write(dest_ptr, ptr::null_mut());
             ptr::addr_of_mut!((*dest.as_mut_ptr()).0) as *mut u8 // address to start of value
         } else {
             // Alloc
-            let layout = alloc::alloc::Layout::for_value::<T>(&*src);
             let heap_ptr = alloc::alloc::alloc(layout);
             ptr::write(dest_ptr, heap_ptr); // set pointer to the heap-location
             heap_ptr
         };
-        ptr::copy_nonoverlapping(src as *const u8, copy_dest_ptr, size);
+        ptr::copy_nonoverlapping(src as *const u8, copy_dest_ptr, layout.size());
         dest.assume_init()
     }
 
@@ -122,22 +121,17 @@ impl<T: ?Sized, const S: usize> TinyBoxSized<T, S> {
     where
         T: Sized,
     {
-        Self::is_tiny_by_components(size_of::<T>(), align_of::<T>())
-    }
-
-    #[inline(always)]
-    fn is_tiny_ref(v: &T) -> bool {
-        Self::is_tiny_by_components(size_of_val(v), align_of_val(v))
+        Self::is_tiny_by_layout(Layout::new::<T>())
     }
 
     #[inline(always)]
     unsafe fn is_tiny_ptr(v: *const T) -> bool {
-        Self::is_tiny_ref(&*v)
+        Self::is_tiny_by_layout(Layout::for_value_raw(v))
     }
 
     #[inline(always)]
-    const fn is_tiny_by_components(size: usize, align: usize) -> bool {
-        size <= (S + 1) * PTR_SIZE && align <= PTR_ALIGN
+    const fn is_tiny_by_layout(layout: Layout) -> bool {
+        layout.size() <= (S + 1) * PTR_SIZE && layout.align() <= PTR_ALIGN
     }
 
     unsafe fn tiny_as_ptr(&self) -> *mut T {
@@ -185,7 +179,7 @@ impl<T: Sized, const S: usize> TinyBoxSized<T, S> {
             }
         } else {
             unsafe {
-                let layout = alloc::alloc::Layout::new::<T>();
+                let layout = Layout::new::<T>();
                 let ptr = alloc::alloc::alloc(layout) as *mut T;
                 ptr::write(ptr, v);
                 Self([ptr::null_mut(); S], ptr)
@@ -205,7 +199,7 @@ impl<T: Sized, const S: usize> TinyBoxSized<T, S> {
             unsafe {
                 // deallocate heap
                 let ptr = boxed.1;
-                let layout = alloc::alloc::Layout::new::<T>();
+                let layout = Layout::new::<T>();
                 let result = ptr::read(ptr);
                 alloc::alloc::dealloc(ptr as *mut u8, layout);
                 mem::forget(boxed);
@@ -268,7 +262,7 @@ impl<T: ?Sized, const S: usize> Drop for TinyBoxSized<T, S> {
                 ptr::drop_in_place::<T>(ptr);
             } else {
                 let ptr = self.1;
-                let layout = alloc::alloc::Layout::for_value::<T>(&*ptr);
+                let layout = Layout::for_value::<T>(&*ptr);
                 ptr::drop_in_place::<T>(ptr);
                 alloc::alloc::dealloc(ptr as *mut u8, layout);
             }
