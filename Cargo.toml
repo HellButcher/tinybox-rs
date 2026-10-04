@@ -10,4 +10,9 @@ categories = ["data-structures", "no-std"]
 readme = "README.md"
 edition = "2021"
 
+[features]
+# allow to use unstable features of Rust (nightly)
+unstable = []
+
 [dependencies]
+
