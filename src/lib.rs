@@ -38,8 +38,8 @@ pub struct TinyBoxSized<T: ?Sized, const S: usize>([*const usize; S], *mut T);
 
 pub type TinyBox<T> = TinyBoxSized<T, 0>;
 
-const PTR_SIZE: usize = mem::size_of::<*mut usize>();
-const PTR_ALIGN: usize = mem::align_of::<*mut usize>();
+const PTR_SIZE: usize = size_of::<*mut usize>();
+const PTR_ALIGN: usize = align_of::<*mut usize>();
 
 #[doc(hidden)]
 pub use core::mem::forget as __forget;
@@ -49,7 +49,7 @@ macro_rules! tinybox {
     ($t:ty => $e:expr; $s:expr) => {{
         let mut val = $e;
         let ptr: *mut _ = &mut val;
-        #[allow(unsafe_code, clippy::forget_copy, clippy::forget_ref)]
+        #[allow(unsafe_code, forgetting_copy_types)]
         unsafe {
             let boxed: $crate::TinyBoxSized<$t, $s> = $crate::TinyBoxSized::read_raw(ptr);
             $crate::__forget(val);
@@ -87,8 +87,8 @@ impl<T: ?Sized, const S: usize> TinyBoxSized<T, S> {
     /// [`mem::forget`]: std::mem::forget
     /// [valid]: std::ptr#safety
     pub unsafe fn read_raw(src: *mut T) -> Self {
-        let size = mem::size_of_val::<T>(&*src);
-        let align = mem::align_of_val::<T>(&*src);
+        let size = size_of_val::<T>(&*src);
+        let align = align_of_val::<T>(&*src);
 
         // initialize dest with source (for retaining vtable in fat-pointer)
         let mut dest: MaybeUninit<Self> = MaybeUninit::zeroed();
@@ -122,12 +122,12 @@ impl<T: ?Sized, const S: usize> TinyBoxSized<T, S> {
     where
         T: Sized,
     {
-        Self::is_tiny_by_components(mem::size_of::<T>(), mem::align_of::<T>())
+        Self::is_tiny_by_components(size_of::<T>(), align_of::<T>())
     }
 
     #[inline(always)]
     fn is_tiny_ref(v: &T) -> bool {
-        Self::is_tiny_by_components(mem::size_of_val(v), mem::align_of_val(v))
+        Self::is_tiny_by_components(size_of_val(v), align_of_val(v))
     }
 
     #[inline(always)]
@@ -160,7 +160,7 @@ impl<T: ?Sized, const S: usize> TinyBoxSized<T, S> {
     }
 
     unsafe fn downcast_unchecked<U: any::Any>(self) -> TinyBoxSized<U, S> {
-        let size = mem::size_of::<TinyBoxSized<U, S>>();
+        let size = size_of::<TinyBoxSized<U, S>>();
         let mut result = MaybeUninit::<TinyBoxSized<U, S>>::uninit();
         ptr::copy_nonoverlapping(
             self.0.as_ptr() as *const u8,
@@ -418,7 +418,7 @@ mod tests {
     use crate::{TinyBox, TinyBoxSized};
     #[test]
     fn test_assumptions() {
-        let ptr_size = mem::size_of::<usize>();
+        let ptr_size = size_of::<usize>();
 
         #[allow(clippy::let_unit_value)]
         let value_zero = ();
@@ -438,24 +438,24 @@ mod tests {
         let dynptr_big: *const dyn Any = dyn_big;
 
         // normal references are not "fat", and size_of_val returns their "normal" size
-        assert_eq!(0, mem::size_of_val(&value_zero));
-        assert_eq!(4, mem::size_of_val(&value_tiny));
-        assert_eq!(32, mem::size_of_val(&value_big));
+        assert_eq!(0, size_of_val(&value_zero));
+        assert_eq!(4, size_of_val(&value_tiny));
+        assert_eq!(32, size_of_val(&value_big));
 
         // even for fat-pointers (dyn), size_of_val returns their "normal" size (without vtable)
-        assert_eq!(0, mem::size_of_val(dyn_zero));
-        assert_eq!(4, mem::size_of_val(dyn_tiny));
-        assert_eq!(32, mem::size_of_val(dyn_big));
+        assert_eq!(0, size_of_val(dyn_zero));
+        assert_eq!(4, size_of_val(dyn_tiny));
+        assert_eq!(32, size_of_val(dyn_big));
 
         // check normal pointer sizes (sizeof<usize>)
-        assert_eq!(ptr_size, mem::size_of_val(&ptr_zero));
-        assert_eq!(ptr_size, mem::size_of_val(&ptr_tiny));
-        assert_eq!(ptr_size, mem::size_of_val(&ptr_big));
+        assert_eq!(ptr_size, size_of_val(&ptr_zero));
+        assert_eq!(ptr_size, size_of_val(&ptr_tiny));
+        assert_eq!(ptr_size, size_of_val(&ptr_big));
 
         // fat-pointers (dyn) are twice as big as a normal pointer (includes vtable reference)
-        assert_eq!(2 * ptr_size, mem::size_of_val(&dynptr_zero));
-        assert_eq!(2 * ptr_size, mem::size_of_val(&dynptr_tiny));
-        assert_eq!(2 * ptr_size, mem::size_of_val(&dynptr_big));
+        assert_eq!(2 * ptr_size, size_of_val(&dynptr_zero));
+        assert_eq!(2 * ptr_size, size_of_val(&dynptr_tiny));
+        assert_eq!(2 * ptr_size, size_of_val(&dynptr_big));
 
         // pointers to ZST are not null
         assert_ne!(ptr::null(), ptr_zero);
