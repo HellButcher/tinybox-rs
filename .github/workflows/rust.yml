@@ -84,7 +84,21 @@ jobs:
       - *checkout
       - *install-toolchain
       - *restore-cache
-      - name: Run tests
+      - name: Run tests (unstable features)
+        run: |
+          cargo miri test
+
+  miri-unstable:
+    name: Validate with miri (unstable feature)
+    runs-on: ubuntu-latest
+    env:
+      TOOLCHAIN: nightly
+      RUSTUP_COMPONENTS: "cargo,miri"
+    steps:
+      - *checkout
+      - *install-toolchain
+      - *restore-cache
+      - name: Run tests (unstable features)
         run: |
           cargo miri test --features unstable
 
