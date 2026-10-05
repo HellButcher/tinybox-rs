@@ -29,6 +29,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       TOOLCHAIN: ${{ matrix.toolchain }}
+      RUSTUP_COMPONENTS: "cargo"
     steps:
       - &checkout
         name: Checkout repository
@@ -39,7 +40,7 @@ jobs:
       - &install-toolchain
         name: Install Toolchain ${{ env.TOOLCHAIN }}
         run: |
-          rustup toolchain update "$TOOLCHAIN" --profile minimal -c "clippy,rustfmt"
+          rustup toolchain update "$TOOLCHAIN" --profile minimal -c "$RUSTUP_COMPONENTS"
           rustup default "$TOOLCHAIN"
       - &restore-cache
         id: restore-cache
@@ -73,12 +74,26 @@ jobs:
             ~/.cargo/git/db/
             target/
         
+  miri:
+    name: Validate with miri
+    runs-on: ubuntu-latest
+    env:
+      TOOLCHAIN: nightly
+      RUSTUP_COMPONENTS: "cargo,miri"
+    steps:
+      - *checkout
+      - *install-toolchain
+      - *restore-cache
+      - name: Run tests
+        run: |
+          cargo miri test --features unstable
 
   check:
     name: Rustfmt & Clippy
     runs-on: ubuntu-latest
     env:
       TOOLCHAIN: stable
+      RUSTUP_COMPONENTS: "cargo,clippy,rustfmt"
     steps:
       - *checkout
       - *install-toolchain
