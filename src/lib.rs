@@ -54,10 +54,19 @@ pub use core::mem::forget as __forget;
 fn ptr_with_metadata_of<T: ?Sized, U: ?Sized>(ptr: *const T, meta: *const U) -> *const U {
     #[cfg(not(feature = "unstable"))]
     {
-        // change the address of meta:
-        // meta is now at the correct address, has the right metadata, but the wrong provenance
-        // (the provenance of meta, not of ptr)
-        meta.with_addr(ptr.addr())
+        // workaround for missing `with_metadata_of` in stable Rust
+        union PtrMetaHack<U: ?Sized> {
+            thin: *const (),
+            fat: *const U,
+        }
+        // initialize the fat pointer (but with wrong provenance)
+        let mut tmp = PtrMetaHack {
+            fat: meta.with_addr(ptr.addr()),
+        };
+        // override the thin pointer part (incuding the correct provenance)
+        tmp.thin = ptr.cast();
+        // return the fat pointer (now with correct provenance)
+        unsafe { tmp.fat }
     }
     #[cfg(feature = "unstable")]
     {
@@ -68,8 +77,19 @@ fn ptr_with_metadata_of<T: ?Sized, U: ?Sized>(ptr: *const T, meta: *const U) -> 
 fn ptr_mut_with_metadata_of<T: ?Sized, U: ?Sized>(ptr: *mut T, meta: *mut U) -> *mut U {
     #[cfg(not(feature = "unstable"))]
     {
-        let addr = ptr.addr();
-        meta.with_addr(addr)
+        // workaround for missing `with_metadata_of` in stable Rust
+        union PtrMetaHack<U: ?Sized> {
+            thin: *mut (),
+            fat: *mut U,
+        }
+        // initialize the fat pointer (but with wrong provenance)
+        let mut tmp = PtrMetaHack {
+            fat: meta.with_addr(ptr.addr()),
+        };
+        // override the thin pointer part (incuding the correct provenance)
+        tmp.thin = ptr.cast();
+        // return the fat pointer (now with correct provenance)
+        unsafe { tmp.fat }
     }
     #[cfg(feature = "unstable")]
     {
