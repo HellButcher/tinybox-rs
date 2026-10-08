@@ -1,7 +1,8 @@
 #![warn(
-    // missing_docs,
-    // rustdoc::missing_doc_code_examples,
+    unknown_or_malformed_diagnostic_attributes,
+    missing_docs,
     future_incompatible,
+    deprecated_safe,
     rust_2018_idioms,
     unused,
     trivial_casts,
@@ -10,15 +11,12 @@
     unused_qualifications,
     unused_crate_dependencies,
     clippy::cargo,
-    clippy::multiple_crate_versions,
-    clippy::empty_line_after_outer_attr,
+    clippy::pedantic,
     clippy::fallible_impl_from,
     clippy::redundant_pub_crate,
     clippy::use_self,
     clippy::suspicious_operation_groupings,
     clippy::useless_let_if_seq,
-    // clippy::missing_errors_doc,
-    // clippy::missing_panics_doc,
     clippy::wildcard_imports
 )]
 #![doc(html_no_source)]
@@ -34,14 +32,28 @@ extern crate std;
 
 use core::{
     alloc::Layout,
-    any, borrow, cmp, fmt, future, hash,
+    any, borrow, cmp, fmt, hash,
     mem::{self, MaybeUninit},
     ops, pin, ptr, task,
 };
 
+/// A [`Box`]-Like type that stores values inline when they fit, and in a heap allocation otherwise.
+///
+/// `TinyBoxSized` is a generic smart pointer that embeds a configurable amount of inline
+/// storage. The effective capacity is `(S + 1) * sizeof(usize)` bytes — the `[usize; S]`
+/// buffer plus one word used for the address/data portion of the pointer itself when the
+/// value is small enough to fit inline. Values whose size and alignment fit within that
+/// buffer are stored directly inside the struct with no heap allocation. Larger values are
+/// allocated on the heap behind a fat pointer, while the struct still contains only the
+/// data pointer and metadata.
+///
+/// The const generic `S` controls the inline storage capacity (in additional pointer-sized
+/// words beyond the one consumed by the pointer's address bits). Use [`TinyBox`] for zero
+/// inline space (`S=0`), or pick a larger `S` to favour slightly bigger types that still fit inline.
 #[repr(C)]
 pub struct TinyBoxSized<T: ?Sized, const S: usize>([usize; S], *mut T);
 
+/// A [`TinyBoxSized`] with zero inline storage (`S=0`).
 pub type TinyBox<T> = TinyBoxSized<T, 0>;
 
 const PTR_SIZE: usize = size_of::<*mut usize>();
@@ -97,6 +109,27 @@ fn ptr_mut_with_metadata_of<T: ?Sized, U: ?Sized>(ptr: *mut T, meta: *mut U) -> 
     }
 }
 
+/// Creates a [`TinyBox`] or [`TinyBoxSized`] from an expression, optionally casting/coercing the inner type.
+///
+/// This is a convenience macro for constructing tiny boxes and coercing, primarily used with trait
+/// objects (e.g. `dyn Any`).
+///
+/// # Syntax
+///
+/// - `tinybox!(expr)` — default [`TinyBox`] (zero inline space).
+/// - `tinybox!(Type => expr)` — casts the inner pointer to `Type`.
+/// - `tinybox!(Type, S => expr)` — full form with explicit type and additional inline size `S`.
+///
+/// # Example
+///
+/// ```
+/// # use tinybox::tinybox;
+/// let boxed = tinybox!(123usize);
+/// assert_eq!(*boxed, 123);
+///
+/// let any_box: tinybox::TinyBox<dyn core::any::Any> = tinybox!(dyn core::any::Any => 42i32);
+/// assert!(any_box.is::<i32>());
+/// ```
 #[macro_export]
 macro_rules! tinybox {
     ($t:ty, $s:expr => $e:expr) => {{
@@ -148,53 +181,54 @@ impl<T: ?Sized, const S: usize> TinyBoxSized<T, S> {
     where
         T: 'static,
     {
-        let layout = Layout::for_value_raw::<T>(src);
+        let layout = unsafe { Layout::for_value_raw::<T>(src) };
 
         if Self::is_tiny_by_layout(layout) {
             // Tiny
             // initialize dest with source (for retaining vtable in fat-pointer)
             let mut dest: MaybeUninit<Self> = MaybeUninit::zeroed();
 
-            let dest_buf = dest.as_mut_ptr().cast::<u8>();
-            dest_buf.copy_from(src as *const u8, layout.size()); // copy the value to the buffer
-
-            // set the pointer metadata and provenance
-            // Note: we use the address-bits for data.
-            // The data might be overlapped with the data written above (we need to keep this data).
-            // we only replace the metadata (&provenance).
-            //
-            // WARNING: We assume that the address-bits of the (fat-)pointer come before the
-            // metadata-bits in memory-layout.
-            // When this assumption is not true, this will be undefined behavior (UB) and the data will be corrupted.
-            let payload_in_ptr = dest_buf.cast::<usize>().add(S).read();
-            let dest_ptr: *mut *mut T = &raw mut (*dest.as_mut_ptr()).1;
-            ptr::write(dest_ptr, src.with_addr(payload_in_ptr));
-            #[cfg(debug_assertions)]
-            {
-                let new_payload = dest.as_ptr().cast::<usize>().add(S).read();
-                debug_assert_eq!(payload_in_ptr, new_payload);
+            let dest_buf = dest.as_mut_ptr();
+            unsafe {
+                dest_buf
+                    .cast::<u8>()
+                    .copy_from(src as *const u8, layout.size()); // copy the value to the buffer
+                // set the pointer metadata and provenance
+                // Note: we use the address-bits for data.
+                // The data might be overlapped with the data written above (we need to keep this data).
+                // we only replace the metadata (&provenance).
+                //
+                // WARNING: We assume that the address-bits of the (fat-)pointer come before the
+                // metadata-bits in memory-layout.
+                // When this assumption is not true, this will be undefined behavior (UB) and the data will be corrupted.
+                let payload_in_ptr = dest_buf.cast::<usize>().add(S).read();
+                let dest_ptr: *mut *mut T = &raw mut (*dest.as_mut_ptr()).1;
+                ptr::write(dest_ptr, src.with_addr(payload_in_ptr));
+                #[cfg(debug_assertions)]
+                {
+                    let new_payload = dest.as_ptr().cast::<usize>().add(S).read();
+                    debug_assert_eq!(payload_in_ptr, new_payload);
+                }
+                dest.assume_init()
             }
-
-            #[cfg(test)]
-            std::println!("created raw: {:p}", dest.as_ptr(),);
-
-            dest.assume_init()
         } else {
             // Alloc
-            let heap_ptr = alloc::alloc::alloc(layout);
-            heap_ptr.copy_from(src as *const u8, layout.size()); // copy the value to the heap-location
-            let heap_ptr = ptr_mut_with_metadata_of(heap_ptr, src); // convert to a fat-pointer
+            unsafe {
+                let heap_ptr = alloc::alloc::alloc(layout);
+                heap_ptr.copy_from(src as *const u8, layout.size()); // copy the value to the heap-location
+                let heap_ptr = ptr_mut_with_metadata_of(heap_ptr, src); // convert to a fat-pointer
 
-            Self([0; S], heap_ptr)
+                Self([0; S], heap_ptr)
+            }
         }
     }
 
-    #[inline(always)]
+    #[inline]
     fn is_tiny(&self) -> bool {
         unsafe { Self::is_tiny_ptr(self.1) }
     }
 
-    #[inline(always)]
+    #[inline]
     const fn is_tiny_sized() -> bool
     where
         T: Sized,
@@ -202,12 +236,12 @@ impl<T: ?Sized, const S: usize> TinyBoxSized<T, S> {
         Self::is_tiny_by_layout(Layout::new::<T>())
     }
 
-    #[inline(always)]
+    #[inline]
     unsafe fn is_tiny_ptr(v: *const T) -> bool {
-        Self::is_tiny_by_layout(Layout::for_value_raw(v))
+        Self::is_tiny_by_layout(unsafe { Layout::for_value_raw(v) })
     }
 
-    #[inline(always)]
+    #[inline]
     const fn is_tiny_by_layout(layout: Layout) -> bool {
         layout.size() <= (S + 1) * PTR_SIZE && layout.align() <= PTR_ALIGN
     }
@@ -250,6 +284,12 @@ impl<T: ?Sized, const S: usize> TinyBoxSized<T, S> {
 }
 
 impl<T: Sized, const S: usize> TinyBoxSized<T, S> {
+    /// Creates a new tiny-box, storing `v` inline if it fits or on the heap otherwise.
+    ///
+    /// A value is considered "tiny" and stored inline when both its size and alignment
+    /// satisfy `size <= (S + 1) * sizeof(usize)` and `align <= sizeof(usize)`. In that case
+    /// no heap allocation occurs. Otherwise the value is heap-allocated and the struct
+    /// holds a pointer to it (then it is similar to [`Box`]).
     #[inline]
     pub fn new(v: T) -> Self {
         let layout = Layout::new::<T>();
@@ -258,29 +298,27 @@ impl<T: Sized, const S: usize> TinyBoxSized<T, S> {
             let dest_buf = dest.as_mut_ptr().cast::<T>();
             unsafe {
                 dest_buf.write(v); // copy the value to the buffer
-
-                #[cfg(test)]
-                std::println!("created new in place: {:p}", dest_buf);
-
                 dest.assume_init()
             }
         } else {
             unsafe {
                 let ptr = alloc::alloc::alloc(layout).cast::<T>();
                 ptr.write(v);
-
-                #[cfg(test)]
-                std::println!("created new alloc: {:p} heap ptr", ptr);
-
                 Self([0; S], ptr)
             }
         }
     }
 
+    /// Consumes the tiny-box, returning the inner value.
+    ///
+    /// If the value is stored on the heap, the heap allocation is deallocated as part of
+    /// this operation. If the value is stored inline, no allocation is involved and the
+    /// value is moved directly from the struct's buffer.
+    #[must_use]
     pub fn into_inner(boxed: Self) -> T {
         if Self::is_tiny_sized() {
             unsafe {
-                let src_ptr = boxed.0.as_ptr() as *const T;
+                let src_ptr = boxed.0.as_ptr().cast::<T>();
                 let result = ptr::read(src_ptr);
                 mem::forget(boxed);
                 result
@@ -291,7 +329,7 @@ impl<T: Sized, const S: usize> TinyBoxSized<T, S> {
                 let ptr = boxed.1;
                 let layout = Layout::new::<T>();
                 let result = ptr::read(ptr);
-                alloc::alloc::dealloc(ptr as *mut u8, layout);
+                alloc::alloc::dealloc(ptr.cast::<u8>(), layout);
                 mem::forget(boxed);
                 result
             }
@@ -343,20 +381,12 @@ impl<T: ?Sized, const S: usize> Drop for TinyBoxSized<T, S> {
         unsafe {
             if self.is_tiny() {
                 let ptr = self.as_ptr_mut();
-                #[cfg(test)]
-                std::println!("Dropping In In Place: {:p}", ptr);
                 ptr::drop_in_place(ptr);
-                #[cfg(test)]
-                std::println!("Done");
             } else {
                 let ptr = self.1;
                 let layout = Layout::for_value_raw(ptr);
-                #[cfg(test)]
-                std::println!("Dropping In Heap: {:p}", ptr);
                 ptr::drop_in_place(ptr);
-                #[cfg(test)]
-                std::println!("Free: {:p}", ptr);
-                alloc::alloc::dealloc(ptr as *mut u8, layout);
+                alloc::alloc::dealloc(ptr.cast(), layout);
             }
         }
     }
@@ -393,7 +423,7 @@ impl<T: ?Sized + fmt::Debug, const S: usize> fmt::Debug for TinyBoxSized<T, S> {
 impl<T: ?Sized, const S: usize> fmt::Pointer for TinyBoxSized<T, S> {
     #[inline]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let ptr: *const T = ops::Deref::deref(self);
+        let ptr: *const T = self.as_ptr();
         fmt::Pointer::fmt(&ptr, f)
     }
 }
@@ -444,11 +474,11 @@ impl<T: ?Sized + Eq, const S: usize> Eq for TinyBoxSized<T, S> {}
 impl<T: ?Sized + hash::Hash, const S: usize> hash::Hash for TinyBoxSized<T, S> {
     #[inline]
     fn hash<H: hash::Hasher>(&self, state: &mut H) {
-        T::hash(self, state)
+        T::hash(self, state);
     }
 }
 
-impl<T: ?Sized + future::Future, const S: usize> future::Future for TinyBoxSized<T, S> {
+impl<T: ?Sized + Future, const S: usize> Future for TinyBoxSized<T, S> {
     type Output = T::Output;
 
     #[inline]
@@ -463,6 +493,11 @@ unsafe impl<T: ?Sized + Send, const S: usize> Send for TinyBoxSized<T, S> {}
 unsafe impl<T: ?Sized + Sync, const S: usize> Sync for TinyBoxSized<T, S> {}
 
 impl<const S: usize> TinyBoxSized<dyn any::Any, S> {
+    /// Attempts to downcast this tiny-box to a concrete type.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(self)` if the inner value is not of type `T`.
     #[inline]
     pub fn downcast<T: any::Any>(self) -> Result<TinyBoxSized<T, S>, Self> {
         if self.is::<T>() {
@@ -474,6 +509,11 @@ impl<const S: usize> TinyBoxSized<dyn any::Any, S> {
 }
 
 impl<const S: usize> TinyBoxSized<dyn any::Any + Send, S> {
+    /// Attempts to downcast this tiny-box to a concrete type.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(self)` if the inner value is not of type `T`.
     #[inline]
     pub fn downcast<T: any::Any>(self) -> Result<TinyBoxSized<T, S>, Self> {
         if self.is::<T>() {
@@ -485,6 +525,11 @@ impl<const S: usize> TinyBoxSized<dyn any::Any + Send, S> {
 }
 
 impl<const S: usize> TinyBoxSized<dyn any::Any + Send + Sync, S> {
+    /// Attempts to downcast this tiny-box to a concrete type.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(self)` if the inner value is not of type `T`.
     #[inline]
     pub fn downcast<T: any::Any>(self) -> Result<TinyBoxSized<T, S>, Self> {
         if self.is::<T>() {
@@ -497,7 +542,7 @@ impl<const S: usize> TinyBoxSized<dyn any::Any + Send + Sync, S> {
 
 #[cfg(test)]
 mod tests {
-    use core::{any::Any, cell::Cell, mem, ops::Deref, ptr};
+    use core::{any::Any, cell::Cell, mem, ptr};
     use std::io::Write;
 
     use alloc::rc::Rc;
@@ -516,9 +561,9 @@ mod tests {
         let dyn_tiny: &dyn Any = &value_tiny;
         let dyn_big: &dyn Any = &value_big;
 
-        let ptr_zero: *const _ = &value_zero;
-        let ptr_tiny: *const _ = &value_tiny;
-        let ptr_big: *const _ = &value_big;
+        let ptr_zero: *const _ = &raw const value_zero;
+        let ptr_tiny: *const _ = &raw const value_tiny;
+        let ptr_big: *const _ = &raw const value_big;
 
         let dynptr_zero: *const dyn Any = dyn_zero;
         let dynptr_tiny: *const dyn Any = dyn_tiny;
@@ -546,7 +591,7 @@ mod tests {
 
         // pointers to ZST are not null
         assert_ne!(ptr::null(), ptr_zero);
-        assert_ne!(ptr::null(), dynptr_zero as *const usize);
+        assert_ne!(ptr::null(), dynptr_zero.cast::<()>());
 
         let dyncomponents_zero: [usize; 2] = unsafe { mem::transmute(dynptr_zero) };
         let dyncomponents_tiny: [usize; 2] = unsafe { mem::transmute(dynptr_tiny) };
@@ -585,29 +630,29 @@ mod tests {
         assert_eq!(12345, *tiny);
         assert!(tiny.is_tiny());
         let tiny_addr: *const TinyBox<_> = ptr::addr_of!(tiny);
-        let tiny_ptr: *const usize = tiny.deref();
-        assert_eq!(tiny_addr as *const usize, tiny_ptr);
+        let tiny_ptr: *const usize = &raw const *tiny;
+        assert_eq!(tiny_addr.cast(), tiny_ptr);
 
         let big = TinyBox::new([12345usize, 5678]);
         assert_eq!([12345usize, 5678], *big);
         assert!(!big.is_tiny());
         let big_addr: *const TinyBox<_> = ptr::addr_of!(big);
-        let big_ptr: *const [usize; 2] = big.deref();
-        assert_ne!(big_addr as *const [usize; 2], big_ptr);
+        let big_ptr: *const [usize; 2] = &raw const *big;
+        assert_ne!(big_addr.cast(), big_ptr);
 
         let tiny_sized: TinyBoxSized<_, 1> = TinyBoxSized::new([12345usize, 5678]);
         assert_eq!([12345usize, 5678], *tiny_sized);
         assert!(tiny_sized.is_tiny());
         let tiny_sized_addr: *const TinyBoxSized<_, 1> = ptr::addr_of!(tiny_sized);
-        let tiny_sized_ptr: *const [usize; 2] = tiny_sized.deref();
-        assert_eq!(tiny_sized_addr as *const [usize; 2], tiny_sized_ptr);
+        let tiny_sized_ptr: *const [usize; 2] = &raw const *tiny_sized;
+        assert_eq!(tiny_sized_addr.cast(), tiny_sized_ptr);
 
         let big_sized: TinyBoxSized<_, 1> = TinyBoxSized::new([12345usize, 5678, 4567]);
         assert_eq!([12345usize, 5678, 4567], *big_sized);
         assert!(!big_sized.is_tiny());
         let big_sized_addr: *const TinyBoxSized<_, 1> = ptr::addr_of!(big_sized);
-        let big_sized_ptr: *const [usize; 3] = big_sized.deref();
-        assert_ne!(big_sized_addr as *const [usize; 3], big_sized_ptr);
+        let big_sized_ptr: *const [usize; 3] = &raw const *big_sized;
+        assert_ne!(big_sized_addr.cast(), big_sized_ptr);
     }
 
     #[test]
@@ -655,8 +700,6 @@ mod tests {
 
     #[test]
     fn test_drop() {
-        let counter = Rc::new(Cell::new(0usize));
-
         struct DropCount(Rc<Cell<usize>>);
         impl DropCount {
             fn new(counter: Rc<Cell<usize>>) -> Self {
@@ -671,12 +714,14 @@ mod tests {
         }
         impl Drop for DropCount {
             fn drop(&mut self) {
-                std::println!("DropCount::drop() called; {:p}", self);
+                std::println!("DropCount::drop() called; {self:p}");
                 let v = self.0.get();
                 std::io::stdout().flush().unwrap();
                 self.0.set(v + 1);
             }
         }
+
+        let counter = Rc::new(Cell::new(0usize));
 
         counter.set(0);
         let tiny = TinyBox::new(DropCount::new(counter.clone()));
@@ -723,17 +768,12 @@ mod tests {
         drop(big_sized);
         assert_eq!(2, counter.get());
 
-        std::println!("RC1: {:?}", Rc::strong_count(&counter));
-
-        std::println!("Test 2");
         counter.set(0);
         let tiny_dyn = tinybox!(dyn Any => DropCount::new(counter.clone()));
         assert!(tiny_dyn.is_tiny());
         assert!(tiny_dyn.is::<DropCount>());
         assert_eq!(0, counter.get());
-        std::println!("RC2: {:?}", Rc::strong_count(&counter));
         drop(tiny_dyn);
-        std::println!("Test 2.4");
         assert_eq!(1, counter.get());
 
         counter.set(0);

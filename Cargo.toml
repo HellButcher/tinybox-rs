@@ -8,7 +8,8 @@ repository = "https://github.com/HellButcher/tinybox-rs.git"
 keywords = ["box", "collection", "dyn", "dst"]
 categories = ["data-structures", "no-std"]
 readme = "README.md"
-edition = "2021"
+edition = "2024"
+rust-version = "1.99"
 
 [features]
 # allow to use unstable features of Rust (nightly)
