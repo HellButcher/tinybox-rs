@@ -22,7 +22,7 @@
 #![doc(html_no_source)]
 #![no_std]
 #![doc = include_str!("../README.md")]
-#![cfg_attr(feature = "unstable", feature(set_ptr_value))]
+#![cfg_attr(feature = "unstable", feature(set_ptr_value, unsize))]
 #![cfg_attr(all(test, feature = "unstable"), feature(ptr_metadata))]
 
 extern crate alloc;
@@ -50,7 +50,6 @@ use core::{
 /// The const generic `S` controls the inline storage capacity (in additional pointer-sized
 /// words beyond the one consumed by the pointer's address bits). Use [`TinyBox`] for zero
 /// inline space (`S=0`), or pick a larger `S` to favour slightly bigger types that still fit inline.
-#[repr(C)]
 pub struct TinyBoxSized<T: ?Sized, const S: usize>([usize; S], *mut T);
 
 /// A [`TinyBoxSized`] with zero inline storage (`S=0`).
@@ -280,6 +279,16 @@ impl<T: ?Sized, const S: usize> TinyBoxSized<T, S> {
         let Self(buf, ptr) = self;
         mem::forget(self);
         TinyBoxSized::<U, S>(buf, mapper(ptr))
+    }
+
+    /// Coerces the inner pointer to a different type, returning a new tiny-box with the same inline storage.
+    #[cfg(feature = "unstable")]
+    #[inline]
+    pub fn coerce<U: ?Sized>(self) -> TinyBoxSized<U, S>
+    where
+        T: core::marker::Unsize<U>,
+    {
+        unsafe { self.__map_ptr_unchecked(|ptr| ptr) }
     }
 }
 
@@ -696,6 +705,20 @@ mod tests {
         let big_sized: TinyBoxSized<dyn Any, 1> = tinybox!(dyn Any => [12345usize, 5678, 4567]; 1);
         assert!(!big_sized.is_tiny());
         assert!(big_sized.downcast::<usize>().is_err());
+    }
+
+    #[cfg(feature = "unstable")]
+    #[test]
+    fn test_any_coerce() {
+        let tiny: TinyBox<dyn Any> = TinyBox::new(12345usize).coerce();
+        assert!(tiny.is_tiny());
+        assert!(tiny.is::<usize>());
+        assert_eq!(12345, *tiny.downcast::<usize>().unwrap());
+
+        let big: TinyBox<dyn Any> = TinyBox::new([12345usize, 5678]).coerce();
+        assert!(!big.is_tiny());
+        assert!(big.is::<[usize; 2]>());
+        assert_eq!([12345, 5678], *big.downcast::<[usize; 2]>().unwrap());
     }
 
     #[test]
