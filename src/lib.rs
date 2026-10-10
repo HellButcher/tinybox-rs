@@ -1,25 +1,3 @@
-#![warn(
-    unknown_or_malformed_diagnostic_attributes,
-    missing_docs,
-    future_incompatible,
-    deprecated_safe,
-    rust_2018_idioms,
-    unused,
-    trivial_casts,
-    trivial_numeric_casts,
-    unused_lifetimes,
-    unused_qualifications,
-    unused_crate_dependencies,
-    clippy::cargo,
-    clippy::pedantic,
-    clippy::fallible_impl_from,
-    clippy::redundant_pub_crate,
-    clippy::use_self,
-    clippy::suspicious_operation_groupings,
-    clippy::useless_let_if_seq,
-    clippy::wildcard_imports
-)]
-#![doc(html_no_source)]
 #![no_std]
 #![doc = include_str!("../README.md")]
 #![cfg_attr(feature = "unstable", feature(set_ptr_value, unsize))]
@@ -66,6 +44,7 @@ fn ptr_with_metadata_of<T: ?Sized, U: ?Sized>(ptr: *const T, meta: *const U) -> 
     #[cfg(not(feature = "unstable"))]
     {
         // workaround for missing `with_metadata_of` in stable Rust
+        #[repr(C)]
         union PtrMetaHack<U: ?Sized> {
             thin: *const (),
             fat: *const U,
@@ -77,6 +56,7 @@ fn ptr_with_metadata_of<T: ?Sized, U: ?Sized>(ptr: *const T, meta: *const U) -> 
         // override the thin pointer part (incuding the correct provenance)
         tmp.thin = ptr.cast();
         // return the fat pointer (now with correct provenance)
+        // SAFETY: The fat pointer is initialized with the correct metadata and provenance, so it is safe to return it.
         unsafe { tmp.fat }
     }
     #[cfg(feature = "unstable")]
@@ -89,6 +69,7 @@ fn ptr_mut_with_metadata_of<T: ?Sized, U: ?Sized>(ptr: *mut T, meta: *mut U) -> 
     #[cfg(not(feature = "unstable"))]
     {
         // workaround for missing `with_metadata_of` in stable Rust
+        #[repr(C)]
         union PtrMetaHack<U: ?Sized> {
             thin: *mut (),
             fat: *mut U,
@@ -100,6 +81,7 @@ fn ptr_mut_with_metadata_of<T: ?Sized, U: ?Sized>(ptr: *mut T, meta: *mut U) -> 
         // override the thin pointer part (incuding the correct provenance)
         tmp.thin = ptr.cast();
         // return the fat pointer (now with correct provenance)
+        // SAFETY: The fat pointer is initialized with the correct metadata and provenance, so it is safe to return it.
         unsafe { tmp.fat }
     }
     #[cfg(feature = "unstable")]
@@ -133,7 +115,7 @@ fn ptr_mut_with_metadata_of<T: ?Sized, U: ?Sized>(ptr: *mut T, meta: *mut U) -> 
 macro_rules! tinybox {
     ($t:ty, $s:expr => $e:expr) => {{
         let mut __val = $crate::TinyBoxSized::<_,  $s>::new($e);
-        #[allow(unsafe_code, forgetting_copy_types)]
+        // SAFETY: This only used regular pointer coercion.
         unsafe {
             __val.__map_ptr_unchecked(|ptr| {
                 let coerced: *mut $t = ptr;
@@ -180,6 +162,8 @@ impl<T: ?Sized, const S: usize> TinyBoxSized<T, S> {
     where
         T: 'static,
     {
+        // SAFETY: `src` is guaranteed to be a valid, properly aligned pointer to a value of type `T`
+        // by the caller-contract documented in this function's Safety section.
         let layout = unsafe { Layout::for_value_raw::<T>(src) };
 
         if Self::is_tiny_by_layout(layout) {
@@ -188,6 +172,11 @@ impl<T: ?Sized, const S: usize> TinyBoxSized<T, S> {
             let mut dest: MaybeUninit<Self> = MaybeUninit::zeroed();
 
             let dest_buf = dest.as_mut_ptr();
+            // SAFETY: `dest_buf` points to a fully uninitialized `MaybeUninit<Self>` which is valid
+            // for reads/writes of any size up to `mem::size_of::<Self>()`. The source pointer `src`
+            // is guaranteed valid and properly aligned by the caller contract. `layout.size()` equals
+            // `mem::size_of::<T>()` which is ≤ `mem::size_of::<Self>()` because `is_tiny_by_layout`
+            // returned true.
             unsafe {
                 dest_buf
                     .cast::<u8>()
@@ -212,6 +201,11 @@ impl<T: ?Sized, const S: usize> TinyBoxSized<T, S> {
             }
         } else {
             // Alloc
+            // SAFETY: `layout` is computed from a valid pointer `src` via `Layout::for_value_raw`,
+            // so it has the correct size and alignment for `T`. `alloc::alloc::alloc(layout)` returns
+            // a block of memory with at least `layout.size()` bytes and `layout.align()` alignment,
+            // which is valid for writes. The value is copied from the valid source `src` into the
+            // newly allocated heap memory.
             unsafe {
                 let heap_ptr = alloc::alloc::alloc(layout);
                 heap_ptr.copy_from(src as *const u8, layout.size()); // copy the value to the heap-location
@@ -224,6 +218,9 @@ impl<T: ?Sized, const S: usize> TinyBoxSized<T, S> {
 
     #[inline]
     fn is_tiny(&self) -> bool {
+        // SAFETY: If T is Sized, `is_tiny_ptr` is always safe. If T is unsized, the total size
+        // fits in `isize` because this `TinyBoxSized` was constructed with a valid value of type T
+        // whose metadata we already read successfully during construction.
         unsafe { Self::is_tiny_ptr(self.1) }
     }
 
@@ -235,8 +232,18 @@ impl<T: ?Sized, const S: usize> TinyBoxSized<T, S> {
         Self::is_tiny_by_layout(Layout::new::<T>())
     }
 
+    /// # Safety
+    /// Same requirements as [`Layout::for_value_raw`]:
+    /// * If `T` is `Sized`, this is always safe to call.
+    /// * If the unsized tail of `T` is a slice `[U]`, `str`, or `dyn Trait`, then the size of
+    ///   the entire value (dynamic tail length + statically sized prefix) must fit in `isize`.
+    ///   (For the special case where the dynamic tail length is `0`, this is always safe.)
+    ///
+    /// [`Layout::for_value_raw`]: core::alloc::Layout::for_value_raw
     #[inline]
     unsafe fn is_tiny_ptr(v: *const T) -> bool {
+        // SAFETY: caller guarantees that if `T` is unsized the total size fits in `isize`,
+        // exactly matching the contract of `Layout::for_value_raw`.
         Self::is_tiny_by_layout(unsafe { Layout::for_value_raw(v) })
     }
 
@@ -270,6 +277,14 @@ impl<T: ?Sized, const S: usize> TinyBoxSized<T, S> {
         TinyBoxSized::<U, S>(buf, ptr.cast::<U>())
     }
 
+    /// Casts the Tiny-Box in a different type by mapping pointer to a different type.
+    /// Returns a new tiny-box with the same inline storage, but replaced pointer metadata.
+    ///
+    /// # Safety
+    ///
+    /// The pointer might not be a valid pointer. It is only used to map the metadata of the pointer to a different type.
+    /// It should not be accessed an only be used to map the metadata of the pointer to a different valid type.
+    /// (for example regular coercing of a pointer to a trait object is valid, or downcasting, if you know the type of the pointer is correct)
     #[doc(hidden)]
     #[inline]
     pub unsafe fn __map_ptr_unchecked<U: ?Sized>(
@@ -288,6 +303,7 @@ impl<T: ?Sized, const S: usize> TinyBoxSized<T, S> {
     where
         T: core::marker::Unsize<U>,
     {
+        // SAFETY: `T: Unsize<U>` guarantees that the pointer can be safely coerced to `*mut U`.
         unsafe { self.__map_ptr_unchecked(|ptr| ptr) }
     }
 }
@@ -305,11 +321,23 @@ impl<T: Sized, const S: usize> TinyBoxSized<T, S> {
         if Self::is_tiny_by_layout(layout) {
             let mut dest: MaybeUninit<Self> = MaybeUninit::zeroed();
             let dest_buf = dest.as_mut_ptr().cast::<T>();
+            // SAFETY: `dest_buf` points to a fully uninitialized `MaybeUninit<Self>` which is valid
+            // for writing `size_of::<T>()` bytes because `is_tiny_by_layout` guarantees that
+            // `T`'s size and alignment fit within the struct's inline storage. `assume_init()` is
+            // safe because we just wrote a fully initialized value of type `T` into the first
+            // `size_of::<T>()` bytes, and `Self` is a struct of `usize` words that are now fully
+            // initialized (the value occupies the first word(s), plus the pointer field is set to
+            // the address-bits encoding the inline data).
             unsafe {
                 dest_buf.write(v); // copy the value to the buffer
                 dest.assume_init()
             }
         } else {
+            // SAFETY: `layout` has the correct size and alignment for `T` (computed via
+            // `Layout::new::<T>()`). `alloc::alloc::alloc(layout)` returns a block with at least
+            // `layout.size()` bytes and `layout.align()` alignment, which is valid for writes.
+            // The pointer is then cast to `*mut T` (address-only cast, alignment preserved since
+            // allocation aligns to at least `align_of::<T>()`).
             unsafe {
                 let ptr = alloc::alloc::alloc(layout).cast::<T>();
                 ptr.write(v);
@@ -326,6 +354,9 @@ impl<T: Sized, const S: usize> TinyBoxSized<T, S> {
     #[must_use]
     pub fn into_inner(boxed: Self) -> T {
         if Self::is_tiny_sized() {
+            // SAFETY: `boxed.0` is the inline storage buffer, and `is_tiny_sized()` guarantees
+            // the value of type `T` is stored there (first `size_of::<T>()` bytes). `ptr::read`
+            // creates a bitwise copy; `mem::forget` prevents double-free.
             unsafe {
                 let src_ptr = boxed.0.as_ptr().cast::<T>();
                 let result = ptr::read(src_ptr);
@@ -333,6 +364,9 @@ impl<T: Sized, const S: usize> TinyBoxSized<T, S> {
                 result
             }
         } else {
+            // SAFETY: `boxed.1` points to a heap-allocated value of type `T` that was allocated
+            // with `layout`. We read it (bitwise copy), deallocate the heap block, and forget the
+            // struct to prevent double-free in Drop.
             unsafe {
                 // deallocate heap
                 let ptr = boxed.1;
@@ -350,6 +384,9 @@ impl<T: ?Sized, const S: usize> ops::Deref for TinyBoxSized<T, S> {
     type Target = T;
     #[inline]
     fn deref(&self) -> &T {
+        // SAFETY: `as_ptr()` returns a pointer that is valid for reads and properly aligned.
+        // When stored inline, the pointer points into the struct's own storage (valid because
+        // `&self` keeps the struct alive). When heap-allocated, it points to a valid heap value.
         unsafe { self.as_ptr().as_ref_unchecked() }
     }
 }
@@ -357,6 +394,10 @@ impl<T: ?Sized, const S: usize> ops::Deref for TinyBoxSized<T, S> {
 impl<T: ?Sized, const S: usize> ops::DerefMut for TinyBoxSized<T, S> {
     #[inline]
     fn deref_mut(&mut self) -> &mut T {
+        // SAFETY: `as_ptr_mut()` returns a pointer that is valid for reads and writes and
+        // properly aligned. When stored inline, the pointer points into the struct's own storage
+        // (valid because `&mut self` keeps the struct alive and exclusive). When heap-allocated,
+        // it points to a valid heap value. No aliases exist because we hold `&mut self`.
         unsafe { self.as_ptr_mut().as_mut_unchecked() }
     }
 }
@@ -387,6 +428,12 @@ impl<T: ?Sized, const S: usize> AsMut<T> for TinyBoxSized<T, S> {
 
 impl<T: ?Sized, const S: usize> Drop for TinyBoxSized<T, S> {
     fn drop(&mut self) {
+        // SAFETY: When stored inline, `as_ptr_mut()` points to the value in our own storage
+        // (valid because `&mut self` keeps us alive). When heap-allocated, `self.1` points to
+        // a valid heap allocation with the correct layout for `T`. We drop the value first,
+        // then free the heap block. The struct's fields are dropped by the compiler after this
+        // function returns, but since we only hold a `*mut T` and `[usize; S]` buffer, there's
+        // nothing extra to clean up — the buffer is just plain data.
         unsafe {
             if self.is_tiny() {
                 let ptr = self.as_ptr_mut();
@@ -487,18 +534,25 @@ impl<T: ?Sized + hash::Hash, const S: usize> hash::Hash for TinyBoxSized<T, S> {
     }
 }
 
-impl<T: ?Sized + Future, const S: usize> Future for TinyBoxSized<T, S> {
-    type Output = T::Output;
+impl<F: ?Sized + Future + Unpin, const S: usize> Future for TinyBoxSized<F, S> {
+    type Output = F::Output;
 
     #[inline]
-    fn poll(self: pin::Pin<&mut Self>, cx: &mut task::Context<'_>) -> task::Poll<Self::Output> {
-        let fut: pin::Pin<&mut T> = unsafe { self.map_unchecked_mut(ops::DerefMut::deref_mut) };
-        fut.poll(cx)
+    fn poll(mut self: pin::Pin<&mut Self>, cx: &mut task::Context<'_>) -> task::Poll<Self::Output> {
+        F::poll(pin::Pin::new(&mut *self), cx)
     }
 }
 
+// SAFETY: `TinyBoxSized<T, S>` wraps a pointer to `T` (heap) or inline storage containing `T`
+// (inline). In both cases, accessing the inner `T` through `&T` or `&mut T` is equivalent to
+// accessing it directly — there are no interior mutability or synchronization primitives that
+// would restrict cross-thread access. Since `T: Send`, all data inside the box can be safely
+// transferred to another thread.
 unsafe impl<T: ?Sized + Send, const S: usize> Send for TinyBoxSized<T, S> {}
 
+// SAFETY: Same reasoning as `Send`. The inner `T` is accessed through a pointer (heap) or inline
+// storage (inline). There are no unsafe interior mutability primitives. Since `T: Sync`, all data
+// inside the box can be safely shared between threads via `&T`.
 unsafe impl<T: ?Sized + Sync, const S: usize> Sync for TinyBoxSized<T, S> {}
 
 impl<const S: usize> TinyBoxSized<dyn any::Any, S> {
@@ -508,8 +562,11 @@ impl<const S: usize> TinyBoxSized<dyn any::Any, S> {
     ///
     /// Returns `Err(self)` if the inner value is not of type `T`.
     #[inline]
-    pub fn downcast<T: any::Any>(self) -> Result<TinyBoxSized<T, S>, Self> {
-        if self.is::<T>() {
+    pub fn downcast<U: any::Any>(self) -> Result<TinyBoxSized<U, S>, Self> {
+        if self.is::<U>() {
+            // SAFETY: `self.is::<U>()` verified that the inner value is indeed of type `U`.
+            // `cast_unchecked` consumes `self` (no aliasing) and casts the pointer to `*mut U`,
+            // which is valid since the value is guaranteed to be of type `U`.
             unsafe { Ok(self.cast_unchecked()) }
         } else {
             Err(self)
@@ -524,8 +581,11 @@ impl<const S: usize> TinyBoxSized<dyn any::Any + Send, S> {
     ///
     /// Returns `Err(self)` if the inner value is not of type `T`.
     #[inline]
-    pub fn downcast<T: any::Any>(self) -> Result<TinyBoxSized<T, S>, Self> {
-        if self.is::<T>() {
+    pub fn downcast<U: any::Any>(self) -> Result<TinyBoxSized<U, S>, Self> {
+        if self.is::<U>() {
+            // SAFETY: `self.is::<U>()` verified that the inner value is indeed of type `U`.
+            // `cast_unchecked` consumes `self` (no aliasing) and casts the pointer to `*mut U`,
+            // which is valid since the value is guaranteed to be of type `U`.
             unsafe { Ok(self.cast_unchecked()) }
         } else {
             Err(self)
@@ -540,8 +600,11 @@ impl<const S: usize> TinyBoxSized<dyn any::Any + Send + Sync, S> {
     ///
     /// Returns `Err(self)` if the inner value is not of type `T`.
     #[inline]
-    pub fn downcast<T: any::Any>(self) -> Result<TinyBoxSized<T, S>, Self> {
-        if self.is::<T>() {
+    pub fn downcast<U: any::Any>(self) -> Result<TinyBoxSized<U, S>, Self> {
+        if self.is::<U>() {
+            // SAFETY: `self.is::<U>()` verified that the inner value is indeed of type `U`.
+            // `cast_unchecked` consumes `self` (no aliasing) and casts the pointer to `*mut U`,
+            // which is valid since the value is guaranteed to be of type `U`.
             unsafe { Ok(self.cast_unchecked()) }
         } else {
             Err(self)
@@ -551,17 +614,18 @@ impl<const S: usize> TinyBoxSized<dyn any::Any + Send + Sync, S> {
 
 #[cfg(test)]
 mod tests {
-    use core::{any::Any, cell::Cell, mem, ptr};
-    use std::io::Write;
-
     use alloc::rc::Rc;
+    use core::{any::Any, cell::Cell, mem, ptr};
 
     use crate::{TinyBox, TinyBoxSized};
+    #[allow(
+        clippy::undocumented_unsafe_blocks,
+        reason = "for the transmute blocks in the trests"
+    )]
     #[test]
     fn test_assumptions() {
         let ptr_size = size_of::<usize>();
 
-        #[allow(clippy::let_unit_value)]
         let value_zero = ();
         let value_tiny = 123u32;
         let value_big = [123u64; 4];
@@ -726,20 +790,12 @@ mod tests {
         struct DropCount(Rc<Cell<usize>>);
         impl DropCount {
             fn new(counter: Rc<Cell<usize>>) -> Self {
-                let v = counter.get();
-                std::println!(
-                    "DropCount::new() called, counter = {v}, {:p}",
-                    &raw const counter
-                );
-                std::io::stdout().flush().unwrap();
                 Self(counter)
             }
         }
         impl Drop for DropCount {
             fn drop(&mut self) {
-                std::println!("DropCount::drop() called; {self:p}");
                 let v = self.0.get();
-                std::io::stdout().flush().unwrap();
                 self.0.set(v + 1);
             }
         }
